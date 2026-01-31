@@ -52,6 +52,8 @@ class VideoIndex:
     Combined index for a video containing:
     - Quarter boundaries (Q1-Q4 start times)
     - Cached timestamp mappings (game time -> VOD time)
+    - Known frame readings (VOD time -> game clock)
+    - Dead zones (VOD ranges with no game clock - ads, halftime, etc.)
     """
 
     def __init__(self, video_path: str, cache_dir: Path):
@@ -63,6 +65,10 @@ class VideoIndex:
         self.quarters: dict[int, float] = {}
         # Cached mappings: {"Q2_8:34": 2397.15, ...}
         self.mappings: dict[str, float] = {}
+        # Known frame readings: {"1800.5": {"quarter": 2, "time": "13:45"}, ...}
+        self.known_frames: dict[str, dict] = {}
+        # Dead zones (no game clock visible): [[start, end], ...]
+        self.dead_zones: list[list[float]] = []
 
         self._load()
 
@@ -77,6 +83,8 @@ class VideoIndex:
                 data = json.load(f)
                 self.quarters = {int(k): v for k, v in data.get("quarters", {}).items()}
                 self.mappings = data.get("mappings", {})
+                self.known_frames = data.get("known_frames", {})
+                self.dead_zones = data.get("dead_zones", [])
 
     def save(self):
         with open(self._cache_path, "w") as f:
@@ -84,7 +92,45 @@ class VideoIndex:
                 "video_path": self.video_path,
                 "quarters": self.quarters,
                 "mappings": self.mappings,
+                "known_frames": self.known_frames,
+                "dead_zones": self.dead_zones,
             }, f, indent=2)
+
+    def add_known_frame(self, vod_seconds: float, quarter: int, game_time: str):
+        """Record a successful frame reading."""
+        self.known_frames[str(round(vod_seconds, 1))] = {
+            "quarter": quarter,
+            "time": game_time
+        }
+
+    def add_dead_zone(self, start: float, end: float):
+        """Record a VOD range with no game clock."""
+        # Merge with existing zones if overlapping
+        new_zone = [start, end]
+        merged = []
+        for zone in self.dead_zones:
+            if zone[1] < new_zone[0] - 10 or zone[0] > new_zone[1] + 10:
+                # No overlap
+                merged.append(zone)
+            else:
+                # Merge
+                new_zone = [min(zone[0], new_zone[0]), max(zone[1], new_zone[1])]
+        merged.append(new_zone)
+        self.dead_zones = sorted(merged, key=lambda z: z[0])
+
+    def is_in_dead_zone(self, vod_seconds: float) -> bool:
+        """Check if a VOD timestamp is in a known dead zone."""
+        for start, end in self.dead_zones:
+            if start <= vod_seconds <= end:
+                return True
+        return False
+
+    def get_nearest_known_frame(self, vod_seconds: float) -> tuple[float, dict] | None:
+        """Find the nearest known frame reading to a VOD timestamp."""
+        if not self.known_frames:
+            return None
+        nearest = min(self.known_frames.keys(), key=lambda k: abs(float(k) - vod_seconds))
+        return (float(nearest), self.known_frames[nearest])
 
     @property
     def is_indexed(self) -> bool:
@@ -285,20 +331,11 @@ Be precise. Only report what you can clearly read."""
         target_time: str,
         search_start: float,
         search_end: float,
-        tolerance_seconds: int = 2
+        tolerance_seconds: int = 3
     ) -> float | None:
         """
-        Binary search to find exact VOD timestamp for a game time.
-
-        Args:
-            target_quarter: The quarter to find (1-4, 5 for OT)
-            target_time: Game clock time to find (e.g., "8:34")
-            search_start: VOD seconds to start search
-            search_end: VOD seconds to end search
-            tolerance_seconds: How close is "exact enough"
-
-        Returns:
-            VOD timestamp in seconds, or None if not found
+        Search for exact VOD timestamp for a game time.
+        Records all frame readings to the index for future searches.
         """
         target_parts = target_time.split(":")
         target_total = int(target_parts[0]) * 60 + int(target_parts[1])
@@ -306,33 +343,57 @@ Be precise. Only report what you can clearly read."""
         low, high = search_start, search_end
         best_match = None
         best_diff = float("inf")
+        no_clock_streak = []  # Track consecutive no-clock positions
 
         iterations = 0
-        max_iterations = 20
+        max_iterations = 25
 
-        while high - low > 5 and iterations < max_iterations:  # 5 second precision
+        while high - low > 3 and iterations < max_iterations:
             iterations += 1
             mid = (low + high) / 2
 
+            # Skip known dead zones
+            if self.index.is_in_dead_zone(mid):
+                # Jump past the dead zone
+                for zone_start, zone_end in self.index.dead_zones:
+                    if zone_start <= mid <= zone_end:
+                        mid = zone_end + 5
+                        break
+
             clock = self.read_clock_at(mid)
+
             if clock is None:
-                # No clock visible, try slightly different position
-                mid += 10
-                clock = self.read_clock_at(mid)
+                no_clock_streak.append(mid)
+                # Try nearby positions
+                for offset in [15, -15, 30, -30]:
+                    alt_pos = mid + offset
+                    if search_start <= alt_pos <= search_end and not self.index.is_in_dead_zone(alt_pos):
+                        clock = self.read_clock_at(alt_pos)
+                        if clock:
+                            mid = alt_pos
+                            no_clock_streak = []
+                            break
+
                 if clock is None:
-                    # Still nothing, narrow search differently
-                    high = mid - 10
+                    # Record potential dead zone if we have multiple consecutive failures
+                    if len(no_clock_streak) >= 2:
+                        zone_start = min(no_clock_streak) - 10
+                        zone_end = max(no_clock_streak) + 10
+                        self.index.add_dead_zone(zone_start, zone_end)
+                        print(f"  Recorded dead zone: {zone_start:.0f}s - {zone_end:.0f}s")
+                    # Move search window
+                    high = mid - 20
                     continue
 
+            # Record successful frame reading
+            self.index.add_known_frame(mid, clock.quarter, clock.time_str)
             print(f"  Iteration {iterations}: VOD {mid:.1f}s -> {clock}")
 
             # Check quarter first
             if clock.quarter != target_quarter:
                 if clock.quarter < target_quarter:
-                    # We're in an earlier quarter, move forward
                     low = mid
                 else:
-                    # We're in a later quarter, move backward
                     high = mid
                 continue
 
@@ -345,20 +406,23 @@ Be precise. Only report what you can clearly read."""
                 best_match = mid
 
             if diff <= tolerance_seconds:
+                self.index.save()
                 return mid
 
             # Game clock counts DOWN, so:
             # - Higher game time (e.g., 10:00) = earlier in quarter = earlier in VOD
             # - Lower game time (e.g., 2:00) = later in quarter = later in VOD
             if current_total > target_total:
-                # We're at 10:00, want 8:00 -> move forward in VOD
                 low = mid
             else:
-                # We're at 6:00, want 8:00 -> move backward in VOD
                 high = mid
 
-        # Return best match if within reasonable tolerance
-        if best_match and best_diff <= tolerance_seconds * 2:
+        # Save what we learned
+        self.index.save()
+
+        # Return best match if within reasonable tolerance (5 seconds)
+        if best_match and best_diff <= 5:
+            print(f"  Using closest match: {best_diff:.0f}s off")
             return best_match
 
         return None
@@ -475,10 +539,10 @@ Be precise. Only report what you can clearly read."""
             print(f"  Q{q}: starts at VOD {vod_secs:.1f}s ({vod_secs/60:.1f} min)")
         print(f"Saved to {self.index._cache_path}")
 
-    def find_vod_timestamp(self, quarter: int, game_time: str) -> float | None:
+    def find_vod_timestamp(self, quarter: int, game_time: str, max_retries: int = 3) -> float:
         """
         Find the VOD timestamp for a specific game time.
-        Uses cached mappings when available, otherwise searches and caches the result.
+        Retries with wider search ranges until found.
         """
         # Check cache first
         cached = self.index.get_mapping(quarter, game_time)
@@ -488,44 +552,71 @@ Be precise. Only report what you can clearly read."""
 
         # Check index exists
         if not self.index.is_indexed:
-            print("ERROR: No index found. Run auto_index first.")
-            return None
+            raise ValueError("No index found. Run auto_index first.")
 
         quarter_range = self.index.get_quarter_range(quarter)
         if not quarter_range:
-            print(f"ERROR: Quarter {quarter} not found in index")
-            return None
+            raise ValueError(f"Quarter {quarter} not found in index")
 
-        search_start, search_end = quarter_range
+        base_start, base_end = quarter_range
+        target_parts = game_time.split(":")
+        target_total = int(target_parts[0]) * 60 + int(target_parts[1])
 
-        # Check for nearby cached values to narrow search
-        nearby = self.index.get_nearby_mappings(quarter, game_time, tolerance_seconds=120)
-        if nearby:
-            target_parts = game_time.split(":")
-            target_total = int(target_parts[0]) * 60 + int(target_parts[1])
+        for attempt in range(max_retries):
+            search_start, search_end = base_start, base_end
 
-            for cached_time, vod_secs in nearby:
-                m_parts = cached_time.split(":")
-                m_total = int(m_parts[0]) * 60 + int(m_parts[1])
-                time_diff = m_total - target_total
+            # Use nearby cached mappings to narrow search
+            nearby = self.index.get_nearby_mappings(quarter, game_time, tolerance_seconds=120 + attempt * 60)
+            if nearby:
+                for cached_time, vod_secs in nearby:
+                    m_parts = cached_time.split(":")
+                    m_total = int(m_parts[0]) * 60 + int(m_parts[1])
+                    time_diff = m_total - target_total
+                    estimated_vod = vod_secs - (time_diff * 1.5)
+                    # Widen range on each retry
+                    buffer = 120 + attempt * 60
+                    search_start = max(base_start, estimated_vod - buffer)
+                    search_end = min(base_end, estimated_vod + buffer)
 
-                estimated_vod = vod_secs - (time_diff * 1.5)
-                search_start = max(search_start, estimated_vod - 120)
-                search_end = min(search_end, estimated_vod + 120)
+            # Also use known frames for better estimation
+            if self.index.known_frames:
+                for vod_str, frame_info in self.index.known_frames.items():
+                    if frame_info["quarter"] == quarter:
+                        f_parts = frame_info["time"].split(":")
+                        f_total = int(f_parts[0]) * 60 + int(f_parts[1])
+                        time_diff = f_total - target_total
+                        estimated = float(vod_str) - (time_diff * 1.3)
+                        if base_start <= estimated <= base_end:
+                            buffer = 90 + attempt * 45
+                            search_start = max(search_start, estimated - buffer)
+                            search_end = min(search_end, estimated + buffer)
+                            break
 
-            print(f"Using nearby cache to narrow search: [{search_start:.0f}s, {search_end:.0f}s]")
+            if attempt > 0:
+                print(f"\nRetry {attempt + 1}/{max_retries} with range [{search_start:.0f}s, {search_end:.0f}s]")
+            else:
+                print(f"Searching for Q{quarter} {game_time} in VOD range [{search_start:.0f}s, {search_end:.0f}s]")
 
-        print(f"Searching for Q{quarter} {game_time} in VOD range [{search_start:.0f}s, {search_end:.0f}s]")
+            vod_timestamp = self.find_exact_time(quarter, game_time, search_start, search_end)
 
-        vod_timestamp = self.find_exact_time(quarter, game_time, search_start, search_end)
+            if vod_timestamp:
+                self.index.set_mapping(quarter, game_time, vod_timestamp)
+                print(f"Found and cached: Q{quarter} {game_time} -> {vod_timestamp:.1f}s")
+                return vod_timestamp
+
+            # Widen search for next attempt
+            print(f"  Not found in range, will retry with wider search...")
+
+        # Final fallback - search entire quarter
+        print(f"\nFinal attempt: searching entire quarter range [{base_start:.0f}s, {base_end:.0f}s]")
+        vod_timestamp = self.find_exact_time(quarter, game_time, base_start, base_end, tolerance_seconds=5)
 
         if vod_timestamp:
             self.index.set_mapping(quarter, game_time, vod_timestamp)
             print(f"Found and cached: Q{quarter} {game_time} -> {vod_timestamp:.1f}s")
             return vod_timestamp
 
-        print(f"Could not find Q{quarter} {game_time}")
-        return None
+        raise RuntimeError(f"Could not find Q{quarter} {game_time} after exhaustive search")
 
     def close(self):
         """Release video capture resources."""
