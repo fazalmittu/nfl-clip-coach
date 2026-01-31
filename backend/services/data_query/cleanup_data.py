@@ -1,19 +1,16 @@
 """
-Clean raw play-by-play CSV: keep only selected games and drop specified columns.
-Output: play_by_play_2023.csv in the same data folder.
+Clean raw play-by-play CSV: keep only the 49ers vs Lions NFC Championship game
+and drop unnecessary columns.
+Output: niners_lions_play_by_play_2023.csv
 """
 import pandas as pd
 from pathlib import Path
 
 DATA_DIR = Path(__file__).resolve().parent
 RAW_CSV = DATA_DIR / "raw_play_by_play_2023.csv"
-OUTPUT_CSV = DATA_DIR / "clean_play_by_play_2023.csv"
+OUTPUT_CSV = DATA_DIR / "niners_lions_play_by_play_2023.csv"
 
-GAMES_TO_KEEP = [
-    "2023_21_DET_SF",
-    "2023_21_KC_BAL",
-    "2023_22_SF_KC",
-]
+GAME_ID = "2023_21_DET_SF"
 
 COLUMNS_TO_REMOVE = [
     # Definitely Redundant
@@ -90,7 +87,7 @@ def main():
     df = pd.read_csv(RAW_CSV)
     original_rows = len(df)
 
-    df = df[df["game_id"].isin(GAMES_TO_KEEP)]
+    df = df[df["game_id"] == GAME_ID]
     filtered_rows = len(df)
 
     cols_present = [c for c in COLUMNS_TO_REMOVE if c in df.columns]
@@ -101,7 +98,7 @@ def main():
     df = df.drop(columns=cols_present, errors="ignore")
 
     df.to_csv(OUTPUT_CSV, index=False)
-    print(f"Read {original_rows} rows, kept {filtered_rows} rows for games {GAMES_TO_KEEP}")
+    print(f"Read {original_rows} rows, kept {filtered_rows} rows for {GAME_ID}")
     print(f"Removed {len(cols_present)} columns, wrote {OUTPUT_CSV}")
 
 
