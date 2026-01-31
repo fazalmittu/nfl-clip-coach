@@ -33,6 +33,7 @@ class RankFilter(BaseModel):
     rank_column: str
     rank_order: Literal["asc", "desc"]
     rank: int = 1
+    top_n: int | None = None  # return first N rows; overrides rank when set
 
 
 class DrivePlayPosition(BaseModel):
@@ -137,12 +138,17 @@ def apply_filters(df: pd.DataFrame, filter_group: FilterGroup) -> pd.DataFrame:
 def apply_rank(df: pd.DataFrame, rank_filter: RankFilter) -> pd.DataFrame:
     ascending = rank_filter.rank_order == "asc"
     df = df.sort_values(rank_filter.rank_column, ascending=ascending)
+    n = rank_filter.top_n  # e.g. "first 3 touchdowns" → top_n=3
     if not rank_filter.group_by:
+        if n is not None:
+            return df.iloc[:n]
         # No grouping — just take the Nth row overall
         idx = rank_filter.rank - 1
         if idx >= len(df):
             return df.iloc[0:0]
         return df.iloc[idx: idx + 1]
+    if n is not None:
+        return df.groupby(rank_filter.group_by, sort=False).head(n)
     ranked = df.groupby(rank_filter.group_by, sort=False).nth(rank_filter.rank - 1)
     return df[df.index.isin(ranked.index)]
 

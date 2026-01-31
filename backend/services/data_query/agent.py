@@ -5,7 +5,11 @@ from __future__ import annotations
 import json
 import os
 
+import logging
+
 import anthropic
+
+logger = logging.getLogger(__name__)
 
 from .columns import get_category_summary, get_columns_for_categories, CATEGORIES
 from .filter import (
@@ -105,13 +109,20 @@ def parse_query(query: str) -> PlayQuery:
                     "}}\n"
                     "play_at examples: drive started with a rush → position=1, play_type=run. "
                     "Second play was a pass → position=2, play_type=pass.\n\n"
-                    '## Optional "rank" pre-filter (narrows data before main query)\n'
+                    '## Optional "rank" — limit results by ordering\n'
                     '{"rank": {"group_by": [...], "rank_column": "...", '
-                    '"rank_order": "asc"|"desc", "rank": 1}}\n'
+                    '"rank_order": "asc"|"desc", "rank": 1, "top_n": null}}\n\n'
+                    'IMPORTANT — "rank" vs "top_n":\n'
+                    '- "rank" (int): return ONLY the Nth item. "first touchdown" → rank=1. "second sack" → rank=2.\n'
+                    '- "top_n" (int or null): return the first N items. "first 2 touchdowns" → top_n=2. "top 5 longest plays" → top_n=5.\n'
+                    "  When top_n is set, rank is ignored.\n"
+                    '- If the user says "first/last N <things>", ALWAYS use top_n=N, NOT rank=N.\n'
                     "Examples:\n"
                     "- Longest drive → rank_column=drive_time_of_possession, rank_order=desc, rank=1\n"
                     "- First drive of each quarter → group_by=[drive_quarter_start], rank_column=drive, rank_order=asc\n"
-                    "- First sack of the game → use type=filter with rank on play_id asc\n\n"
+                    "- First sack of the game → use type=filter with rank on play_id asc, rank=1\n"
+                    "- First 2 touchdowns → use type=filter with rank on play_id asc, top_n=2\n"
+                    "- Last 3 plays → rank on play_id desc, top_n=3\n\n"
                     "Condition operators: eq, neq, gt, lt, gte, lte, contains, not_contains, isin\n\n"
                     "Key conventions:\n"
                     "- Binary columns (touchdown, sack, fumble, etc.) use eq 1 or eq 0\n"
@@ -133,6 +144,7 @@ def parse_query(query: str) -> PlayQuery:
             text = text[:-3]
         text = text.strip()
     raw = json.loads(text)
+    logger.info(f"LLM output: {raw}")
     return _parse_play_query(raw)
 
 
