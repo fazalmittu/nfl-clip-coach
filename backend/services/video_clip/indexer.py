@@ -47,104 +47,99 @@ class GameClock:
         return f"{q_str} {self.time_str}"
 
 
-@dataclass
-class QuarterBoundary:
-    """VOD timestamps for a quarter's start and end."""
-    quarter: int
-    start_vod_seconds: float  # VOD time when quarter starts (15:00 on clock)
-    end_vod_seconds: float | None = None  # VOD time when quarter ends (0:00 on clock)
+class VideoIndex:
+    """
+    Combined index for a video containing:
+    - Quarter boundaries (Q1-Q4 start times)
+    - Cached timestamp mappings (game time -> VOD time)
+    """
 
+    def __init__(self, video_path: str, cache_dir: Path):
+        self.video_path = video_path
+        self.cache_dir = cache_dir
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
 
-@dataclass
-class TimelineIndex:
-    """Complete timeline index for a game video."""
-    video_path: str
-    quarters: list[QuarterBoundary]
-    halftime_start_vod: float | None = None
-    halftime_end_vod: float | None = None
+        # Quarter start times: {1: 90.0, 2: 1571.25, ...}
+        self.quarters: dict[int, float] = {}
+        # Cached mappings: {"Q2_8:34": 2397.15, ...}
+        self.mappings: dict[str, float] = {}
+
+        self._load()
+
+    @property
+    def _cache_path(self) -> Path:
+        video_name = Path(self.video_path).stem
+        return self.cache_dir / f"{video_name}.json"
+
+    def _load(self):
+        if self._cache_path.exists():
+            with open(self._cache_path) as f:
+                data = json.load(f)
+                self.quarters = {int(k): v for k, v in data.get("quarters", {}).items()}
+                self.mappings = data.get("mappings", {})
+
+    def save(self):
+        with open(self._cache_path, "w") as f:
+            json.dump({
+                "video_path": self.video_path,
+                "quarters": self.quarters,
+                "mappings": self.mappings,
+            }, f, indent=2)
+
+    @property
+    def is_indexed(self) -> bool:
+        return len(self.quarters) > 0
+
+    def set_quarter_start(self, quarter: int, vod_seconds: float):
+        self.quarters[quarter] = vod_seconds
+
+    def get_quarter_start(self, quarter: int) -> float | None:
+        return self.quarters.get(quarter)
 
     def get_quarter_range(self, quarter: int) -> tuple[float, float] | None:
-        """Get VOD time range for a quarter."""
-        for q in self.quarters:
-            if q.quarter == quarter:
-                if q.end_vod_seconds:
-                    return (q.start_vod_seconds, q.end_vod_seconds)
-                # If no end, estimate based on next quarter or video length
-                return (q.start_vod_seconds, q.start_vod_seconds + 3600)  # 1hr fallback
-        return None
+        """Get VOD time range for a quarter (start to next quarter's start)."""
+        if quarter not in self.quarters:
+            return None
 
-    def to_dict(self) -> dict:
-        return {
-            "video_path": self.video_path,
-            "quarters": [asdict(q) for q in self.quarters],
-            "halftime_start_vod": self.halftime_start_vod,
-            "halftime_end_vod": self.halftime_end_vod,
-        }
+        start = self.quarters[quarter]
+        sorted_quarters = sorted(self.quarters.keys())
+        idx = sorted_quarters.index(quarter)
 
-    @classmethod
-    def from_dict(cls, data: dict) -> "TimelineIndex":
-        return cls(
-            video_path=data["video_path"],
-            quarters=[QuarterBoundary(**q) for q in data["quarters"]],
-            halftime_start_vod=data.get("halftime_start_vod"),
-            halftime_end_vod=data.get("halftime_end_vod"),
-        )
+        if idx + 1 < len(sorted_quarters):
+            end = self.quarters[sorted_quarters[idx + 1]]
+        else:
+            end = start + 2700  # 45 min fallback for last quarter
 
-
-@dataclass
-class TimestampMapping:
-    """A cached mapping from game time to VOD time."""
-    quarter: int
-    game_time: str  # "8:34"
-    vod_seconds: float
-
-
-class TimestampCache:
-    """Persistent cache of game time -> VOD time mappings."""
-
-    def __init__(self, cache_path: Path):
-        self.cache_path = cache_path
-        self.mappings: dict[str, TimestampMapping] = {}
-        self._load()
+        return (start, end)
 
     def _make_key(self, quarter: int, game_time: str) -> str:
         return f"Q{quarter}_{game_time}"
 
-    def _load(self):
-        if self.cache_path.exists():
-            with open(self.cache_path) as f:
-                data = json.load(f)
-                for key, m in data.items():
-                    self.mappings[key] = TimestampMapping(**m)
-
-    def _save(self):
-        with open(self.cache_path, "w") as f:
-            json.dump({k: asdict(v) for k, v in self.mappings.items()}, f, indent=2)
-
-    def get(self, quarter: int, game_time: str) -> TimestampMapping | None:
+    def get_mapping(self, quarter: int, game_time: str) -> float | None:
         return self.mappings.get(self._make_key(quarter, game_time))
 
-    def set(self, quarter: int, game_time: str, vod_seconds: float):
-        key = self._make_key(quarter, game_time)
-        self.mappings[key] = TimestampMapping(quarter, game_time, vod_seconds)
-        self._save()
+    def set_mapping(self, quarter: int, game_time: str, vod_seconds: float):
+        self.mappings[self._make_key(quarter, game_time)] = vod_seconds
+        self.save()
 
-    def get_nearby(self, quarter: int, game_time: str, tolerance_seconds: int = 60) -> list[TimestampMapping]:
+    def get_nearby_mappings(self, quarter: int, game_time: str, tolerance_seconds: int = 60) -> list[tuple[str, float]]:
         """Get cached mappings near the target time for interpolation."""
         target_parts = game_time.split(":")
         target_total = int(target_parts[0]) * 60 + int(target_parts[1])
 
         nearby = []
-        for mapping in self.mappings.values():
-            if mapping.quarter != quarter:
+        prefix = f"Q{quarter}_"
+        for key, vod_secs in self.mappings.items():
+            if not key.startswith(prefix):
                 continue
-            parts = mapping.game_time.split(":")
+            cached_time = key[len(prefix):]
+            parts = cached_time.split(":")
             total = int(parts[0]) * 60 + int(parts[1])
             if abs(total - target_total) <= tolerance_seconds:
-                nearby.append(mapping)
+                nearby.append((cached_time, vod_secs))
 
-        return sorted(nearby, key=lambda m: abs(
-            int(m.game_time.split(":")[0]) * 60 + int(m.game_time.split(":")[1]) - target_total
+        return sorted(nearby, key=lambda x: abs(
+            int(x[0].split(":")[0]) * 60 + int(x[0].split(":")[1]) - target_total
         ))
 
 
@@ -153,8 +148,13 @@ class VideoIndexer:
 
     def __init__(self, video_path: str, data_dir: Path | None = None):
         self.video_path = video_path
-        self.data_dir = data_dir or Path(__file__).parent.parent.parent / "data"
-        self.data_dir.mkdir(exist_ok=True)
+
+        # Cache directory (not committed to git)
+        self.cache_dir = Path(__file__).parent.parent.parent / ".cache"
+        self.cache_dir.mkdir(exist_ok=True)
+
+        # Combined index + cache
+        self.index = VideoIndex(video_path, self.cache_dir)
 
         # Initialize Gemini client
         self.client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
@@ -363,22 +363,13 @@ Be precise. Only report what you can clearly read."""
 
         return None
 
-    def index_quarter_manually(
-        self,
-        quarter: int,
-        rough_start_vod: float,
-        rough_end_vod: float | None = None
-    ) -> QuarterBoundary:
-        """
-        Index a quarter given rough estimates of start/end times.
-        Refines to find exact 15:00 start and 0:00 end.
-        """
+    def _index_quarter(self, quarter: int, rough_start_vod: float):
+        """Index a quarter given a rough estimate, saves to self.index."""
         print(f"\nIndexing Q{quarter}...")
-
-        # Find exact start (15:00)
         print(f"  Finding Q{quarter} start (15:00)...")
-        search_start = max(0, rough_start_vod - 120)  # 2 min before estimate
-        search_end = rough_start_vod + 120  # 2 min after
+
+        search_start = max(0, rough_start_vod - 120)
+        search_end = rough_start_vod + 120
 
         start_vod = self.find_exact_time(quarter, "15:00", search_start, search_end)
         if start_vod is None:
@@ -387,60 +378,22 @@ Be precise. Only report what you can clearly read."""
         else:
             print(f"  Found Q{quarter} start at VOD {start_vod:.1f}s")
 
-        # Find exact end (0:00) if rough end provided
-        end_vod = None
-        if rough_end_vod:
-            print(f"  Finding Q{quarter} end (0:00)...")
-            search_start = rough_end_vod - 120
-            search_end = rough_end_vod + 120
+        self.index.set_quarter_start(quarter, start_vod)
 
-            end_vod = self.find_exact_time(quarter, "0:00", search_start, search_end, tolerance_seconds=3)
-            if end_vod is None:
-                print(f"  WARNING: Could not find exact Q{quarter} end, using estimate")
-                end_vod = rough_end_vod
-            else:
-                print(f"  Found Q{quarter} end at VOD {end_vod:.1f}s")
-
-        return QuarterBoundary(quarter=quarter, start_vod_seconds=start_vod, end_vod_seconds=end_vod)
-
-    def create_manual_index(
-        self,
-        q1_start: float,
-        q2_start: float,
-        q3_start: float,
-        q4_start: float,
-        q1_end: float | None = None,
-        q2_end: float | None = None,
-        q3_end: float | None = None,
-        q4_end: float | None = None,
-        halftime_start: float | None = None,
-        halftime_end: float | None = None,
-    ) -> TimelineIndex:
-        """
-        Create a timeline index from rough manual estimates.
-        Refines each quarter boundary to exact timestamps.
-        """
+    def create_manual_index(self, q1_start: float, q2_start: float, q3_start: float, q4_start: float):
+        """Create index from rough manual estimates. Refines each to exact timestamps."""
         print(f"Creating manual index for: {self.video_path}")
         print(f"Video duration: {self.duration:.1f}s ({self.duration/60:.1f} min)")
 
-        quarters = []
+        self._index_quarter(1, q1_start)
+        self._index_quarter(2, q2_start)
+        self._index_quarter(3, q3_start)
+        self._index_quarter(4, q4_start)
 
-        # Index each quarter
-        quarters.append(self.index_quarter_manually(1, q1_start, q1_end))
-        quarters.append(self.index_quarter_manually(2, q2_start, q2_end))
-        quarters.append(self.index_quarter_manually(3, q3_start, q3_end))
-        quarters.append(self.index_quarter_manually(4, q4_start, q4_end))
+        self.index.save()
+        print(f"\nSaved to {self.index._cache_path}")
 
-        index = TimelineIndex(
-            video_path=self.video_path,
-            quarters=quarters,
-            halftime_start_vod=halftime_start,
-            halftime_end_vod=halftime_end,
-        )
-
-        return index
-
-    def auto_index(self, sample_interval: int = 300) -> TimelineIndex:
+    def auto_index(self, sample_interval: int = 300):
         """
         Automatically discover quarter boundaries by scanning the video.
 
@@ -492,7 +445,6 @@ Be precise. Only report what you can clearly read."""
 
         # Phase 3: Refine each quarter to find exact 15:00
         print("\n--- Refining quarter boundaries ---")
-        quarters = []
 
         for q in sorted(quarter_samples.keys()):
             if q > 5:  # Skip invalid quarters
@@ -511,58 +463,69 @@ Be precise. Only report what you can clearly read."""
 
             if exact_start:
                 print(f"  -> Found Q{q} start at VOD {exact_start:.1f}s ({exact_start/60:.1f} min)")
-                quarters.append(QuarterBoundary(quarter=q, start_vod_seconds=exact_start))
+                self.index.set_quarter_start(q, exact_start)
             else:
                 print(f"  -> WARNING: Could not find exact start, using rough estimate")
-                quarters.append(QuarterBoundary(quarter=q, start_vod_seconds=rough_start))
+                self.index.set_quarter_start(q, rough_start)
 
-        # Detect halftime (gap between Q2 and Q3)
-        halftime_start = None
-        halftime_end = None
-        if 2 in quarter_samples and 3 in quarter_samples:
-            q2_latest = max(quarter_samples[2], key=lambda x: x[0])[0]
-            q3_earliest = min(quarter_samples[3], key=lambda x: x[0])[0]
-            if q3_earliest - q2_latest > 300:  # More than 5 min gap = halftime
-                halftime_start = q2_latest
-                halftime_end = q3_earliest
-                print(f"\nDetected halftime: VOD {halftime_start/60:.1f} - {halftime_end/60:.1f} min")
-
-        index = TimelineIndex(
-            video_path=self.video_path,
-            quarters=sorted(quarters, key=lambda q: q.quarter),
-            halftime_start_vod=halftime_start,
-            halftime_end_vod=halftime_end,
-        )
+        self.index.save()
 
         print("\n=== Index Complete ===")
-        for q in index.quarters:
-            print(f"  Q{q.quarter}: starts at VOD {q.start_vod_seconds:.1f}s ({q.start_vod_seconds/60:.1f} min)")
+        for q, vod_secs in sorted(self.index.quarters.items()):
+            print(f"  Q{q}: starts at VOD {vod_secs:.1f}s ({vod_secs/60:.1f} min)")
+        print(f"Saved to {self.index._cache_path}")
 
-        return index
+    def find_vod_timestamp(self, quarter: int, game_time: str) -> float | None:
+        """
+        Find the VOD timestamp for a specific game time.
+        Uses cached mappings when available, otherwise searches and caches the result.
+        """
+        # Check cache first
+        cached = self.index.get_mapping(quarter, game_time)
+        if cached:
+            print(f"Cache hit: Q{quarter} {game_time} -> {cached:.1f}s")
+            return cached
 
-    @property
-    def video_basename(self) -> str:
-        """Get base name of video file without extension."""
-        return Path(self.video_path).stem
-
-    def save_index(self, index: TimelineIndex, filename: str | None = None):
-        """Save timeline index to JSON. Uses video-specific filename by default."""
-        if filename is None:
-            filename = f"{self.video_basename}_index.json"
-        path = self.data_dir / filename
-        with open(path, "w") as f:
-            json.dump(index.to_dict(), f, indent=2)
-        print(f"Saved index to {path}")
-
-    def load_index(self, filename: str | None = None) -> TimelineIndex | None:
-        """Load timeline index from JSON. Uses video-specific filename by default."""
-        if filename is None:
-            filename = f"{self.video_basename}_index.json"
-        path = self.data_dir / filename
-        if not path.exists():
+        # Check index exists
+        if not self.index.is_indexed:
+            print("ERROR: No index found. Run auto_index first.")
             return None
-        with open(path) as f:
-            return TimelineIndex.from_dict(json.load(f))
+
+        quarter_range = self.index.get_quarter_range(quarter)
+        if not quarter_range:
+            print(f"ERROR: Quarter {quarter} not found in index")
+            return None
+
+        search_start, search_end = quarter_range
+
+        # Check for nearby cached values to narrow search
+        nearby = self.index.get_nearby_mappings(quarter, game_time, tolerance_seconds=120)
+        if nearby:
+            target_parts = game_time.split(":")
+            target_total = int(target_parts[0]) * 60 + int(target_parts[1])
+
+            for cached_time, vod_secs in nearby:
+                m_parts = cached_time.split(":")
+                m_total = int(m_parts[0]) * 60 + int(m_parts[1])
+                time_diff = m_total - target_total
+
+                estimated_vod = vod_secs - (time_diff * 1.5)
+                search_start = max(search_start, estimated_vod - 120)
+                search_end = min(search_end, estimated_vod + 120)
+
+            print(f"Using nearby cache to narrow search: [{search_start:.0f}s, {search_end:.0f}s]")
+
+        print(f"Searching for Q{quarter} {game_time} in VOD range [{search_start:.0f}s, {search_end:.0f}s]")
+
+        vod_timestamp = self.find_exact_time(quarter, game_time, search_start, search_end)
+
+        if vod_timestamp:
+            self.index.set_mapping(quarter, game_time, vod_timestamp)
+            print(f"Found and cached: Q{quarter} {game_time} -> {vod_timestamp:.1f}s")
+            return vod_timestamp
+
+        print(f"Could not find Q{quarter} {game_time}")
+        return None
 
     def close(self):
         """Release video capture resources."""
@@ -587,8 +550,7 @@ def main():
     indexer = VideoIndexer(video_path)
 
     try:
-        index = indexer.auto_index(sample_interval=sample_interval)
-        indexer.save_index(index)
+        indexer.auto_index(sample_interval=sample_interval)
     finally:
         indexer.close()
 

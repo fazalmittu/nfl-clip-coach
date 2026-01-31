@@ -1,0 +1,17 @@
+# Virtual environment
+venv/
+
+# Cache (video index + timestamp mappings)
+.cache/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Environment variables
+.env
+
+# IDE
+.vscode/
+.idea/
