@@ -4,6 +4,7 @@ from pydantic import BaseModel
 class GameTimestamp(BaseModel):
     quarter: int  # 1-4, 5 for OT
     time: str  # "12:45" (game clock, counts down)
+    duration_seconds: float  # how long the play lasted
 
 
 class ClipTimestamp(BaseModel):
