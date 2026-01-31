@@ -29,7 +29,7 @@ class SequenceStep(BaseModel):
 
 
 class RankFilter(BaseModel):
-    group_by: list[str]
+    group_by: list[str] = []
     rank_column: str
     rank_order: Literal["asc", "desc"]
     rank: int = 1
@@ -137,13 +137,14 @@ def apply_filters(df: pd.DataFrame, filter_group: FilterGroup) -> pd.DataFrame:
 def apply_rank(df: pd.DataFrame, rank_filter: RankFilter) -> pd.DataFrame:
     ascending = rank_filter.rank_order == "asc"
     df = df.sort_values(rank_filter.rank_column, ascending=ascending)
+    if not rank_filter.group_by:
+        # No grouping — just take the Nth row overall
+        idx = rank_filter.rank - 1
+        if idx >= len(df):
+            return df.iloc[0:0]
+        return df.iloc[idx: idx + 1]
     ranked = df.groupby(rank_filter.group_by, sort=False).nth(rank_filter.rank - 1)
-    # nth returns rows — get the values that identify the groups
-    if rank_filter.group_by == ["game_id"] or len(rank_filter.group_by) == 0:
-        return df[df.index.isin(ranked.index)]
-    # For drive-level ranking, get the unique key values and filter back
-    key_vals = ranked[rank_filter.rank_column].unique()
-    return df[df[rank_filter.rank_column].isin(key_vals)]
+    return df[df.index.isin(ranked.index)]
 
 
 # ── Sequence matching ─────────────────────────────────────────────────────

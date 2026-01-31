@@ -56,20 +56,19 @@ def query(nl_query: str) -> DataQueryResult:
     df = load_data()
     df = df.sort_values(["game_id", "play_id"]).reset_index(drop=True)
 
-    # Pre-filter with rank if specified
-    if play_query.rank is not None:
-        df = apply_rank(df, play_query.rank).reset_index(drop=True)
-
     timestamps: list[GameTimestamp] = []
 
     if play_query.type == "filter":
-        # Single-play matching (original behavior)
         df = df.assign(_duration=_compute_durations(df))
         results = apply_filters(df, play_query.filters)
+        if play_query.rank is not None:
+            results = apply_rank(results, play_query.rank).reset_index(drop=True)
         for _, row in results.iterrows():
             timestamps.append(_timestamp_from_row(row))
 
     elif play_query.type == "sequence":
+        if play_query.rank is not None:
+            df = apply_rank(df, play_query.rank).reset_index(drop=True)
         spans = apply_sequence(df, play_query.anchor, play_query.then or [])
         for start_idx, end_idx in spans:
             row = df.iloc[start_idx]
@@ -82,6 +81,8 @@ def query(nl_query: str) -> DataQueryResult:
             )
 
     elif play_query.type == "drive":
+        if play_query.rank is not None:
+            df = apply_rank(df, play_query.rank).reset_index(drop=True)
         spans = apply_drive_filter(df, play_query.drive_filter)
         for start_idx, end_idx in spans:
             row = df.iloc[start_idx]
