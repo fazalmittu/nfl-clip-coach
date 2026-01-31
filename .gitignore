@@ -11,6 +11,7 @@ env/
 
 # Data
 *.parquet
+*.mp4
 
 # IDE
 .vscode/
