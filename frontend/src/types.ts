@@ -10,6 +10,16 @@ export interface ClipTimestamp {
   description?: string;
 }
 
-export interface ClipResponse {
-  clips: ClipTimestamp[];
+export type AnalyzeMode = 'video' | 'chat';
+
+export interface AnalyzeRequest {
+  mode: AnalyzeMode;
+  query: string;
+  session_id?: string;
+}
+
+export interface AnalyzeResponse {
+  mode: AnalyzeMode;
+  clips?: ClipTimestamp[];
+  response?: string;
 }
