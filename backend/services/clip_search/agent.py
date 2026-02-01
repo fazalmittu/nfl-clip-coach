@@ -11,7 +11,7 @@ import anthropic
 
 logger = logging.getLogger(__name__)
 
-from .columns import get_category_summary, get_columns_for_categories, CATEGORIES
+from services.data import get_category_summary, get_columns_for_categories, CATEGORIES
 from .filter import (
     FilterCondition,
     FilterGroup,

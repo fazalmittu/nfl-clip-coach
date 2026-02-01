@@ -1,15 +1,15 @@
-"""data_query — natural-language to filtered NFL play-by-play data."""
+"""clip_search — natural-language to filtered NFL play-by-play data."""
 
 import pandas as pd
 
 from models.schemas import DataQueryResult, GameTimestamp
+from services.data import load_data
 from .agent import parse_query
 from .filter import (
     apply_filters,
     apply_rank,
     apply_sequence,
     apply_drive_filter,
-    load_data,
     FilterCondition,
     FilterGroup,
     PlayQuery,
