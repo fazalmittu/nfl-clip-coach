@@ -51,4 +51,5 @@ export interface ChatMessage {
   content: string;
   suggestClips?: boolean;
   pendingClipQuery?: string;
+  clips?: ClipTimestamp[];
 }

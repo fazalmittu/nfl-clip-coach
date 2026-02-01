@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
+import ReactMarkdown from 'react-markdown';
 import type { ClipTimestamp, ChatMessage } from '../types';
 
 function formatClipTime(seconds: number): string {
@@ -25,7 +26,7 @@ interface ChatPanelProps {
   isLoading: boolean;
   clips: ClipTimestamp[];
   currentClipIndex: number;
-  onClipChange: (index: number) => void;
+  onClipChange: (index: number, sourceClips?: ClipTimestamp[]) => void;
 }
 
 export function ChatPanel({
@@ -96,13 +97,33 @@ export function ChatPanel({
                   <div className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                     <div className={`max-w-[88%] text-[13px] leading-relaxed ${
                       msg.role === 'user'
-                        ? 'bg-amber-500/20 text-amber-100 px-3.5 py-2 rounded-2xl rounded-br-md border border-amber-500/25'
+                        ? 'bg-white/[0.10] text-neutral-100 px-3.5 py-2 rounded-2xl rounded-br-md border border-white/[0.12]'
                         : 'text-neutral-400 px-3.5 py-2 rounded-2xl rounded-bl-md bg-white/[0.04] border border-white/[0.06]'
                     }`}>
-                      {msg.content}
+                      {msg.role === 'assistant' ? (
+                        <ReactMarkdown
+                          components={{
+                            p: ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
+                            strong: ({ children }) => <strong className="text-neutral-200 font-semibold">{children}</strong>,
+                            em: ({ children }) => <em className="text-neutral-300">{children}</em>,
+                            ul: ({ children }) => <ul className="list-disc list-inside mb-2 last:mb-0 space-y-0.5">{children}</ul>,
+                            ol: ({ children }) => <ol className="list-decimal list-inside mb-2 last:mb-0 space-y-0.5">{children}</ol>,
+                            li: ({ children }) => <li className="text-neutral-400">{children}</li>,
+                            h1: ({ children }) => <h1 className="text-sm font-semibold text-neutral-200 mb-1">{children}</h1>,
+                            h2: ({ children }) => <h2 className="text-sm font-semibold text-neutral-200 mb-1">{children}</h2>,
+                            h3: ({ children }) => <h3 className="text-[13px] font-semibold text-neutral-300 mb-1">{children}</h3>,
+                            code: ({ children }) => <code className="text-amber-400/90 bg-amber-500/10 px-1 py-0.5 rounded text-[12px]">{children}</code>,
+                            hr: () => <hr className="border-white/[0.06] my-2" />,
+                          }}
+                        >
+                          {msg.content}
+                        </ReactMarkdown>
+                      ) : (
+                        msg.content
+                      )}
                     </div>
                   </div>
-                  {/* Cursor-style "Find clips" action card */}
+                  {/* "Find clips" action card */}
                   {msg.role === 'assistant' && msg.suggestClips && msg.pendingClipQuery && (
                     <div className="flex justify-start">
                       <div className="max-w-[88%] rounded-xl border border-amber-500/25 bg-amber-500/5 px-4 py-3 shadow-sm">
@@ -132,80 +153,83 @@ export function ChatPanel({
                       </div>
                     </div>
                   )}
+                  {/* Inline clips rendered with amber glass effect */}
+                  {msg.clips && msg.clips.length > 0 && (
+                    <div className="space-y-2 mt-1">
+                      <div className="flex items-center gap-2 px-0.5">
+                        <span className="text-[10px] font-semibold text-amber-400/90 uppercase tracking-wider">Clips</span>
+                        <span className="text-[10px] bg-amber-500/25 text-amber-400 px-1.5 py-0.5 rounded-full font-medium border border-amber-500/30">{msg.clips.length}</span>
+                      </div>
+                      <div className="space-y-1.5">
+                        {msg.clips.map((clip, ci) => {
+                          const isActive = clips.length > 0 && clips[currentClipIndex]?.start_time === clip.start_time;
+                          const downStr = formatDown(clip.down, clip.ydstogo);
+                          return (
+                            <button
+                              key={ci}
+                              type="button"
+                              onClick={() => onClipChange(ci, msg.clips)}
+                              className={`w-full text-left rounded-xl px-3 py-2.5 transition-all border cursor-pointer backdrop-blur-sm ${
+                                isActive
+                                  ? 'bg-amber-500/20 border-amber-500/40 ring-1 ring-amber-500/25 shadow-[0_0_12px_rgba(251,191,36,0.1)]'
+                                  : 'bg-amber-500/[0.06] border-amber-500/15 hover:bg-amber-500/[0.12] hover:border-amber-500/25'
+                              }`}
+                            >
+                              <div className="flex items-center gap-2 mb-1">
+                                <span className={`flex items-center justify-center w-5 h-5 rounded text-[10px] font-bold shrink-0 ${
+                                  isActive ? 'bg-amber-500/25 text-amber-400' : 'bg-white/[0.08] text-neutral-500'
+                                }`}>
+                                  {ci + 1}
+                                </span>
+                                <span className={`text-[11px] font-mono tabular-nums ${isActive ? 'text-amber-400' : 'text-neutral-500'}`}>
+                                  {formatClipTime(clip.start_time)}
+                                </span>
+                                {clip.quarter && clip.game_time && (
+                                  <span className="text-[10px] text-neutral-600">Q{clip.quarter} {clip.game_time}</span>
+                                )}
+                                {clip.is_touchdown && <span className="text-[10px] text-amber-400 font-semibold">TD</span>}
+                                {clip.is_interception && <span className="text-[10px] text-red-400 font-semibold">INT</span>}
+                              </div>
+                              {clip.description && (
+                                <p className={`text-[12px] leading-snug line-clamp-2 ${isActive ? 'text-amber-100/90' : 'text-amber-200/70'}`}>
+                                  {clip.description}
+                                </p>
+                              )}
+                              <div className="flex flex-wrap gap-x-2 gap-y-0.5 mt-1.5 text-[10px]">
+                                {downStr && <span className="text-neutral-600">{downStr}</span>}
+                                {(clip.passer || clip.rusher) && (
+                                  <span className="text-neutral-500">
+                                    {clip.passer || clip.rusher}
+                                    {clip.receiver ? ` → ${clip.receiver}` : ''}
+                                  </span>
+                                )}
+                                {clip.yards_gained != null && (
+                                  <span className={clip.yards_gained > 0 ? 'text-emerald-500/80' : 'text-red-400/80'}>
+                                    {clip.yards_gained > 0 ? '+' : ''}{clip.yards_gained} yds
+                                  </span>
+                                )}
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
                 </div>
               ))}
 
               {isLoading && (
                 <div className="flex justify-start">
-                  <div className="flex items-center gap-2 px-3 py-2 rounded-2xl bg-amber-500/10 border border-amber-500/20">
-                    <svg className="animate-spin h-4 w-4 text-amber-400" viewBox="0 0 24 24">
+                  <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-white/[0.04] border border-white/[0.06]">
+                    <svg className="animate-spin h-4 w-4 text-neutral-500" viewBox="0 0 24 24">
                       <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
                       <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
                     </svg>
-                    <span className="text-xs text-amber-400/90">Thinking...</span>
+                    <span className="text-xs text-neutral-500">Thinking...</span>
                   </div>
                 </div>
               )}
 
-              {clips.length > 0 && (
-                <div className="space-y-2.5 pt-2">
-                  <div className="flex items-center gap-2 px-0.5">
-                    <span className="text-[10px] font-semibold text-amber-400/90 uppercase tracking-wider">Clips</span>
-                    <span className="text-[10px] bg-amber-500/25 text-amber-400 px-1.5 py-0.5 rounded-full font-medium border border-amber-500/30">{clips.length}</span>
-                  </div>
-                  <div className="space-y-2 max-h-[280px] overflow-y-auto pr-1">
-                    {clips.map((clip, index) => {
-                      const isActive = index === currentClipIndex;
-                      const downStr = formatDown(clip.down, clip.ydstogo);
-                      return (
-                        <button
-                          key={index}
-                          type="button"
-                          onClick={() => onClipChange(index)}
-                          className={`w-full text-left rounded-xl px-3 py-2.5 transition-all border cursor-pointer ${
-                            isActive
-                              ? 'bg-amber-500/20 border-amber-500/40 ring-1 ring-amber-500/25'
-                              : 'bg-amber-950/20 border-amber-500/10 hover:bg-amber-500/10 hover:border-amber-500/20'
-                          }`}
-                        >
-                          <div className="flex items-center gap-2 mb-1">
-                            <span className={`flex items-center justify-center w-5 h-5 rounded text-[10px] font-bold shrink-0 ${
-                              isActive ? 'bg-amber-500/25 text-amber-400' : 'bg-white/[0.08] text-neutral-500'
-                            }`}>
-                              {index + 1}
-                            </span>
-                            <span className={`text-[11px] font-mono tabular-nums ${isActive ? 'text-amber-400' : 'text-neutral-500'}`}>
-                              {formatClipTime(clip.start_time)}
-                            </span>
-                            {clip.quarter && clip.game_time && (
-                              <span className="text-[10px] text-neutral-600">Q{clip.quarter} {clip.game_time}</span>
-                            )}
-                          </div>
-                          {clip.description && (
-                            <p className={`text-[12px] leading-snug line-clamp-2 ${isActive ? 'text-amber-100/90' : 'text-amber-200/70'}`}>
-                              {clip.description}
-                            </p>
-                          )}
-                          <div className="flex flex-wrap gap-x-2 gap-y-0.5 mt-1.5 text-[10px]">
-                            {downStr && <span className="text-neutral-600">{downStr}</span>}
-                            {(clip.passer || clip.rusher) && (
-                              <span className="text-neutral-500">
-                                {clip.passer || clip.rusher}
-                                {clip.receiver ? ` → ${clip.receiver}` : ''}
-                              </span>
-                            )}
-                            {clip.yards_gained != null && (
-                              <span className={clip.yards_gained > 0 ? 'text-emerald-500/80' : 'text-red-400/80'}>
-                                {clip.yards_gained > 0 ? '+' : ''}{clip.yards_gained} yds
-                              </span>
-                            )}
-                          </div>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
               <div ref={messagesEndRef} />
             </div>
           )}

@@ -13,7 +13,36 @@ from models.schemas import GameTimestamp, ClipTimestamp
 from .indexer import VideoIndexer
 
 PRE_PLAY_PADDING = 5  # seconds before clock-match to start clip
-DEFAULT_CLIP_DURATION = 50  # seconds per clip (play + buffer)
+
+# Base clip durations by play_type (seconds of video after start point)
+PLAY_TYPE_DURATIONS: dict[str, float] = {
+    "pass":         20,
+    "run":          20,
+    "kickoff":      25,
+    "punt":         25,
+    "field_goal":   20,
+    "extra_point":  15,
+    "no_play":      15,
+    "qb_kneel":     10,
+    "qb_spike":     10,
+}
+DEFAULT_CLIP_DURATION = 20  # fallback for unknown play_type
+
+TOUCHDOWN_BONUS = 25.0   # celebration + replay + XP setup
+TURNOVER_BONUS  = 15.0   # INT/fumble return + aftermath
+
+
+def _get_clip_duration(play_data: dict) -> float:
+    """Compute clip duration based on play type and event flags."""
+    play_type = play_data.get("play_type") or ""
+    base = PLAY_TYPE_DURATIONS.get(play_type, DEFAULT_CLIP_DURATION)
+
+    if play_data.get("touchdown"):
+        base += TOUCHDOWN_BONUS
+    if play_data.get("interception") or play_data.get("fumble"):
+        base += TURNOVER_BONUS
+
+    return base
 
 
 def get_clips(
@@ -33,7 +62,8 @@ def get_clips(
         clips = []
         for ts in timestamps:
             start = max(0, indexer.find_vod_timestamp(ts.quarter, ts.time) - PRE_PLAY_PADDING)
-            end = start + DEFAULT_CLIP_DURATION + play_buffer_seconds
+            duration = _get_clip_duration(pd)
+            end = start + duration + play_buffer_seconds
             pd = ts.play_data or {}
             clips.append(ClipTimestamp(
                 start_time=start,

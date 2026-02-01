@@ -6,6 +6,7 @@ interface VideoPlayerProps {
   gameTitle?: string;
   clips: ClipTimestamp[];
   currentClipIndex: number;
+  clipSeek?: number;
   onClipChange: (index: number) => void;
   playbackSpeed?: number;
   videoFit?: 'contain' | 'fill';
@@ -17,6 +18,7 @@ export function VideoPlayer({
   gameTitle,
   clips,
   currentClipIndex,
+  clipSeek = 0,
   onClipChange,
   playbackSpeed = 1,
   videoFit = 'contain',
@@ -29,6 +31,8 @@ export function VideoPlayer({
   const [volume, setVolume] = useState(1);
   const [isMuted, setIsMuted] = useState(false);
   const [showVolume, setShowVolume] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
+  const timelineRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -61,7 +65,7 @@ export function VideoPlayer({
       videoRef.current.currentTime = clip.start_time;
       videoRef.current.play();
     }
-  }, [currentClipIndex, clips]);
+  }, [currentClipIndex, clips, clipSeek]);
 
   useEffect(() => {
     const v = videoRef.current;
@@ -94,12 +98,53 @@ export function VideoPlayer({
     }
   }, []);
 
-  const handleTimelineClick = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!videoRef.current || !duration) return;
-    const rect = e.currentTarget.getBoundingClientRect();
-    const percent = (e.clientX - rect.left) / rect.width;
-    videoRef.current.currentTime = Math.max(0, Math.min(duration, percent * duration));
-  };
+  const wasPlayingRef = useRef(false);
+
+  const getPercentFromX = useCallback((clientX: number) => {
+    if (!timelineRef.current) return 0;
+    const rect = timelineRef.current.getBoundingClientRect();
+    return Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+  }, []);
+
+  const handleTimelineMouseDown = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    const v = videoRef.current;
+    if (!v || !duration) return;
+
+    wasPlayingRef.current = !v.paused;
+    v.pause();
+
+    const percent = getPercentFromX(e.clientX);
+    v.currentTime = percent * duration;
+    setCurrentTime(percent * duration);
+    setIsDragging(true);
+  }, [duration, getPercentFromX]);
+
+  useEffect(() => {
+    if (!isDragging) return;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!videoRef.current || !duration) return;
+      const percent = getPercentFromX(e.clientX);
+      const time = percent * duration;
+      setCurrentTime(time);
+      videoRef.current.currentTime = time;
+    };
+
+    const handleMouseUp = () => {
+      setIsDragging(false);
+      if (wasPlayingRef.current && videoRef.current) {
+        videoRef.current.play();
+      }
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isDragging, duration, getPercentFromX]);
 
   const toggleFullscreen = useCallback(() => {
     const v = videoRef.current;
@@ -155,8 +200,9 @@ export function VideoPlayer({
       <div className="px-4 py-3 space-y-2.5">
         {/* Timeline */}
         <div
-          className="relative h-1 bg-white/[0.08] rounded-full cursor-pointer group/timeline"
-          onClick={handleTimelineClick}
+          ref={timelineRef}
+          className="relative h-1 bg-white/[0.08] rounded-full cursor-pointer group/timeline select-none"
+          onMouseDown={handleTimelineMouseDown}
         >
           <div
             className="absolute top-0 left-0 h-full bg-amber-500/60 rounded-full pointer-events-none"
@@ -164,7 +210,9 @@ export function VideoPlayer({
           />
           {/* Scrubber dot */}
           <div
-            className="absolute top-1/2 -translate-y-1/2 w-3 h-3 rounded-full bg-amber-400 opacity-0 group-hover/timeline:opacity-100 transition-opacity pointer-events-none shadow-[0_0_6px_rgba(251,191,36,0.5)]"
+            className={`absolute top-1/2 -translate-y-1/2 w-3 h-3 rounded-full bg-amber-400 transition-opacity pointer-events-none shadow-[0_0_6px_rgba(251,191,36,0.5)] ${
+              isDragging ? 'opacity-100 scale-125' : 'opacity-0 group-hover/timeline:opacity-100'
+            }`}
             style={{ left: duration ? `calc(${(currentTime / duration) * 100}% - 6px)` : '0%' }}
           />
           {/* Clip markers */}
@@ -203,17 +251,19 @@ export function VideoPlayer({
           </button>
 
           {/* Skip back */}
-          <button onClick={() => skip(-10)} className="p-1 text-neutral-500 hover:text-neutral-300 transition-colors cursor-pointer">
+          <button onClick={() => skip(-10)} className="p-1 text-neutral-500 hover:text-neutral-300 transition-colors cursor-pointer flex flex-col items-center">
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" d="M9 15 3 9m0 0 6-6M3 9h12a6 6 0 0 1 0 12h-3" />
             </svg>
+            <span className="text-[8px] font-mono leading-none mt-0.5">10s</span>
           </button>
 
           {/* Skip forward */}
-          <button onClick={() => skip(10)} className="p-1 text-neutral-500 hover:text-neutral-300 transition-colors cursor-pointer">
+          <button onClick={() => skip(10)} className="p-1 text-neutral-500 hover:text-neutral-300 transition-colors cursor-pointer flex flex-col items-center">
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" d="m15 15 6-6m0 0-6-6m6 6H9a6 6 0 0 0 0 12h3" />
             </svg>
+            <span className="text-[8px] font-mono leading-none mt-0.5">10s</span>
           </button>
 
           {/* Volume */}

@@ -43,13 +43,25 @@ def analyze(req: AnalyzeRequest):
     elif req.mode == "chat":
         session_id = req.session_id or "default"
         response = chat(session_id, req.query, game_context=req.game_name)
+
+        # Only suggest clips for play-specific queries, not general analysis
         suggest_clips = False
-        try:
-            clip_result = clip_search_query(req.query)
-            if clip_result.timestamps:
-                suggest_clips = True
-        except Exception:
-            pass
+        query_lower = req.query.lower().strip()
+        general_keywords = [
+            "summarize", "summary", "overview", "recap", "analyze", "analysis",
+            "how did", "who won", "what happened", "tell me about", "explain",
+            "what was the score", "final score",
+        ]
+        is_general = any(kw in query_lower for kw in general_keywords)
+
+        if not is_general:
+            try:
+                clip_result = clip_search_query(req.query)
+                if clip_result.timestamps:
+                    suggest_clips = True
+            except Exception:
+                pass
+
         return AnalyzeResponse(mode="chat", response=response, suggest_clips=suggest_clips)
 
     return AnalyzeResponse(mode=req.mode, response="Unknown mode. Use 'chat' or 'video'.")
