@@ -303,6 +303,41 @@ Be precise. Only report what you can clearly read."""
 
         return None
 
+    def is_play_starting(self, frame_bytes: bytes) -> bool:
+        """Check if this frame shows the start of a play (pre-snap formation)."""
+        prompt = """Look at this NFL game broadcast frame.
+
+Is this showing a PRE-SNAP formation where the play is about to start?
+
+Signs of pre-snap (play starting):
+- Teams are lined up at the line of scrimmage
+- Players are in set position
+- QB is under center or in shotgun, waiting for snap
+- Play clock visible and counting down
+- Wide/stationary camera angle showing full formation
+
+Signs this is NOT pre-snap:
+- Ball is already in motion (play in progress)
+- Players running/tackling (mid-play)
+- Replay/highlight footage
+- Commercial or graphic overlay
+- Sideline shots or crowd shots
+- Post-play celebration or huddle
+
+Respond with ONLY one word:
+- YES if this is a pre-snap formation (play about to start)
+- NO if this is not pre-snap"""
+
+        response = self.client.models.generate_content(
+            model=self.model_name,
+            contents=[
+                types.Part.from_bytes(data=frame_bytes, mime_type="image/jpeg"),
+                prompt
+            ]
+        )
+
+        return "YES" in response.text.strip().upper()
+
     def read_clock_at(self, vod_seconds: float, retries: int = 3, offset_step: float = 2.0) -> GameClock | None:
         """Read clock at a position, with retries at nearby frames if clock not visible."""
         offsets = [0]
@@ -325,103 +360,222 @@ Be precise. Only report what you can clearly read."""
 
         return None
 
+    def find_play_start(self, vod_seconds: float, target_quarter: int, target_time: str) -> float:
+        """
+        Given a timestamp where we found the target game clock, find the EXACT
+        start of the play (pre-snap formation, just before the snap).
+
+        Strategy:
+        1. Binary search backwards to find when clock FIRST showed this time
+        2. From there, search forward to find pre-snap formation
+        3. Return the exact frame where play is about to start
+        """
+        target_parts = target_time.split(":")
+        target_total = int(target_parts[0]) * 60 + int(target_parts[1])
+
+        print(f"  Finding exact play start near VOD {vod_seconds:.1f}s...")
+
+        # Step 1: Binary search backwards to find when clock first shows this time
+        # This is the transition point from previous time to this time
+        low = max(0, vod_seconds - 45)  # Clock won't show same time for > 45s
+        high = vod_seconds
+
+        while high - low > 1.0:
+            mid = (low + high) / 2
+            clock = self.read_clock_at(mid, retries=1)
+
+            if clock and clock.quarter == target_quarter and clock.total_seconds == target_total:
+                # Still showing target time, search earlier
+                high = mid
+            else:
+                # Different time or no clock, search later
+                low = mid
+
+        # 'high' is now approximately when clock first shows target time
+        earliest_match = high
+        print(f"    Clock transitions to {target_time} at VOD ~{earliest_match:.1f}s")
+
+        # Step 2: Search around this point for pre-snap formation
+        # The pre-snap is usually 2-8 seconds after the clock shows the time
+        # (teams huddle, line up, then snap)
+        best_pre_snap = None
+
+        # Check multiple points, prefer earlier ones that are pre-snap
+        for offset in [2, 4, 6, 8, 0, 10, -2]:
+            check_time = earliest_match + offset
+            if check_time < 0:
+                continue
+            try:
+                frame = self.extract_frame(check_time)
+                # Verify clock still shows correct time
+                clock = self.read_game_clock(frame)
+                if not clock or clock.quarter != target_quarter:
+                    continue
+                if abs(clock.total_seconds - target_total) > 1:
+                    continue
+
+                if self.is_play_starting(frame):
+                    best_pre_snap = check_time
+                    print(f"    Found pre-snap at VOD {check_time:.1f}s")
+                    break
+            except Exception:
+                continue
+
+        if best_pre_snap:
+            return best_pre_snap
+
+        # Fallback: return earliest match + small offset (likely right after huddle break)
+        fallback = earliest_match + 3
+        print(f"    No clear pre-snap found, using {fallback:.1f}s")
+        return fallback
+
     def find_exact_time(
         self,
         target_quarter: int,
         target_time: str,
         search_start: float,
         search_end: float,
-        tolerance_seconds: int = 3
+        tolerance_seconds: int = 1
     ) -> float | None:
         """
-        Search for exact VOD timestamp for a game time.
-        Records all frame readings to the index for future searches.
+        Smart search for VOD timestamp using interpolation from readings.
+
+        Unlike binary search, this uses each reading to calculate where
+        the target SHOULD be, then jumps directly there. Much faster.
         """
         target_parts = target_time.split(":")
         target_total = int(target_parts[0]) * 60 + int(target_parts[1])
 
-        low, high = search_start, search_end
+        # Collect readings as we go: [(vod_time, game_seconds), ...]
+        readings: list[tuple[float, int, int]] = []  # (vod, quarter, game_secs)
+
         best_match = None
         best_diff = float("inf")
-        no_clock_streak = []  # Track consecutive no-clock positions
+
+        # Smart starting point: use existing data to estimate, or quarter start + offset
+        # Quarter starts at 15:00 (900 seconds), so offset based on target time
+        quarter_start = self.index.get_quarter_start(target_quarter)
+        if quarter_start:
+            # Estimate: each game second ≈ 1.5 VOD seconds from quarter start
+            game_elapsed = 900 - target_total  # seconds elapsed in quarter
+            current_pos = quarter_start + (game_elapsed * 1.5)
+            current_pos = max(search_start, min(search_end, current_pos))
+        else:
+            current_pos = (search_start + search_end) / 2
 
         iterations = 0
-        max_iterations = 25
+        max_iterations = 15
 
-        while high - low > 3 and iterations < max_iterations:
+        while iterations < max_iterations:
             iterations += 1
-            mid = (low + high) / 2
+
+            # Don't clamp - if math says we need to go outside range, try it
+            # Just keep within video bounds
+            current_pos = max(0, min(self.duration, current_pos))
 
             # Skip known dead zones
-            if self.index.is_in_dead_zone(mid):
-                # Jump past the dead zone
+            if self.index.is_in_dead_zone(current_pos):
                 for zone_start, zone_end in self.index.dead_zones:
-                    if zone_start <= mid <= zone_end:
-                        mid = zone_end + 5
+                    if zone_start <= current_pos <= zone_end:
+                        current_pos = zone_end + 5
                         break
 
-            clock = self.read_clock_at(mid)
+            clock = self.read_clock_at(current_pos, retries=2)
 
             if clock is None:
-                no_clock_streak.append(mid)
-                # Try nearby positions
-                for offset in [15, -15, 30, -30]:
-                    alt_pos = mid + offset
-                    if search_start <= alt_pos <= search_end and not self.index.is_in_dead_zone(alt_pos):
-                        clock = self.read_clock_at(alt_pos)
+                # Try nearby
+                found = False
+                for offset in [10, -10, 20, -20]:
+                    alt = current_pos + offset
+                    if 0 <= alt <= self.duration:
+                        clock = self.read_clock_at(alt, retries=1)
                         if clock:
-                            mid = alt_pos
-                            no_clock_streak = []
+                            current_pos = alt
+                            found = True
                             break
-
-                if clock is None:
-                    # Record potential dead zone if we have multiple consecutive failures
-                    if len(no_clock_streak) >= 2:
-                        zone_start = min(no_clock_streak) - 10
-                        zone_end = max(no_clock_streak) + 10
-                        self.index.add_dead_zone(zone_start, zone_end)
-                        print(f"  Recorded dead zone: {zone_start:.0f}s - {zone_end:.0f}s")
-                    # Move search window
-                    high = mid - 20
+                if not found:
+                    # Jump forward and try again
+                    current_pos += 30
                     continue
 
-            # Record successful frame reading
-            self.index.add_known_frame(mid, clock.quarter, clock.time_str)
-            print(f"  Iteration {iterations}: VOD {mid:.1f}s -> {clock}")
+            # Record this reading
+            self.index.add_known_frame(current_pos, clock.quarter, clock.time_str)
+            current_game_secs = clock.total_seconds
+            readings.append((current_pos, clock.quarter, current_game_secs))
 
-            # Check quarter first
-            if clock.quarter != target_quarter:
-                if clock.quarter < target_quarter:
-                    low = mid
-                else:
-                    high = mid
-                continue
+            print(f"  Iteration {iterations}: VOD {current_pos:.1f}s -> {clock}")
 
-            # Same quarter - compare time
-            current_total = clock.total_seconds
-            diff = abs(current_total - target_total)
+            # Check if we found it
+            if clock.quarter == target_quarter:
+                diff = abs(current_game_secs - target_total)
+                if diff < best_diff:
+                    best_diff = diff
+                    best_match = current_pos
 
-            if diff < best_diff:
-                best_diff = diff
-                best_match = mid
+                if diff <= tolerance_seconds:
+                    self.index.save()
+                    return current_pos
 
-            if diff <= tolerance_seconds:
-                self.index.save()
-                return mid
+            # SMART JUMP: Calculate where target should be based on this reading
+            # Game time and VOD time are roughly linear (1 game sec ≈ 1-1.5 VOD sec)
 
-            # Game clock counts DOWN, so:
-            # - Higher game time (e.g., 10:00) = earlier in quarter = earlier in VOD
-            # - Lower game time (e.g., 2:00) = later in quarter = later in VOD
-            if current_total > target_total:
-                low = mid
+            if clock.quarter == target_quarter:
+                # Same quarter: interpolate directly
+                # Game clock counts DOWN, so if we need higher game time, go earlier (lower VOD)
+                game_diff = current_game_secs - target_total  # negative = need to go earlier in VOD
+                # Estimate: 1 game second ≈ 1.3 VOD seconds (accounts for play stoppages)
+                vod_jump = game_diff * 1.3
+                next_pos = current_pos + vod_jump
+                print(f"    Game diff: {game_diff}s, VOD jump: {vod_jump:.1f}s -> {next_pos:.1f}s")
+            elif clock.quarter < target_quarter:
+                # We're in an earlier quarter, need to go later in VOD
+                # Estimate: each quarter is ~45 min of VOD, ~15 min of game time
+                quarters_diff = target_quarter - clock.quarter
+                # Jump forward significantly
+                next_pos = current_pos + (quarters_diff * 2000) + (900 - target_total) * 1.2
             else:
-                high = mid
+                # We're in a later quarter, need to go earlier in VOD
+                quarters_diff = clock.quarter - target_quarter
+                next_pos = current_pos - (quarters_diff * 2000) - (target_total) * 1.2
 
-        # Save what we learned
+            # Use multiple readings to refine estimate (linear regression style)
+            same_quarter_readings = [(v, g) for v, q, g in readings if q == target_quarter]
+            if len(same_quarter_readings) >= 2:
+                # Calculate slope: VOD change per game-second change
+                r1, r2 = same_quarter_readings[-2], same_quarter_readings[-1]
+                vod_diff = r2[0] - r1[0]
+                game_diff = r1[1] - r2[1]  # Note: reversed because game clock counts down
+                if game_diff != 0:
+                    slope = vod_diff / game_diff  # VOD seconds per game second
+                    # Extrapolate from most recent reading
+                    game_to_target = same_quarter_readings[-1][1] - target_total
+                    next_pos = same_quarter_readings[-1][0] + (game_to_target * slope)
+                    print(f"    Interpolated: slope={slope:.2f}, jumping to {next_pos:.1f}s")
+
+            # Don't oscillate - if we're close, take smaller steps
+            if best_match and abs(next_pos - current_pos) > 100:
+                # We're jumping far but have a close match - be more conservative
+                next_pos = current_pos + (next_pos - current_pos) * 0.5
+
+            # Detect if we're stuck (oscillating between same positions)
+            if len(readings) >= 4:
+                last_positions = [r[0] for r in readings[-4:]]
+                unique_positions = set(round(p, 0) for p in last_positions)
+                # Only converge if we have multiple UNIQUE positions that are close
+                if len(unique_positions) >= 3 and max(last_positions) - min(last_positions) < 15:
+                    print(f"    Converged at ~{current_pos:.1f}s")
+                    break
+                # Also break if we're stuck on the exact same position
+                if len(unique_positions) == 1:
+                    print(f"    Stuck at {current_pos:.1f}s, breaking out")
+                    break
+
+            current_pos = next_pos
+            print(f"    Next position: {current_pos:.1f}s")
+
         self.index.save()
 
-        # Return best match if within reasonable tolerance (5 seconds)
-        if best_match and best_diff <= 5:
+        if best_match and best_diff <= 2:
             print(f"  Using closest match: {best_diff:.0f}s off")
             return best_match
 
@@ -432,8 +586,13 @@ Be precise. Only report what you can clearly read."""
         print(f"\nIndexing Q{quarter}...")
         print(f"  Finding Q{quarter} start (15:00)...")
 
-        search_start = max(0, rough_start_vod - 120)
+        # Search from well before the rough estimate to a bit after
+        # Q4 15:00 could be 15+ minutes of VOD time before a sample showing Q4 7:00
+        # (15 min game time ≈ 20-25 min VOD time with stoppages)
+        search_start = max(0, rough_start_vod - 1500)  # Up to 25 min before
         search_end = rough_start_vod + 120
+
+        print(f"  Searching in range [{search_start:.0f}s, {search_end:.0f}s]")
 
         start_vod = self.find_exact_time(quarter, "15:00", search_start, search_end)
         if start_vod is None:
@@ -539,17 +698,13 @@ Be precise. Only report what you can clearly read."""
             print(f"  Q{q}: starts at VOD {vod_secs:.1f}s ({vod_secs/60:.1f} min)")
         print(f"Saved to {self.index._cache_path}")
 
-    def find_vod_timestamp(self, quarter: int, game_time: str, max_retries: int = 3) -> float:
+    def find_vod_timestamp(self, quarter: int, game_time: str) -> float:
         """
         Find the VOD timestamp for a specific game time.
-        Retries with wider search ranges until found.
-        """
-        # Check cache first
-        cached = self.index.get_mapping(quarter, game_time)
-        if cached:
-            print(f"Cache hit: Q{quarter} {game_time} -> {cached:.1f}s")
-            return cached
 
+        IMPORTANT: Always verifies the result is at the START of a play,
+        even for cached results. Cached data might point to mid-play.
+        """
         # Check index exists
         if not self.index.is_indexed:
             raise ValueError("No index found. Run auto_index first.")
@@ -562,61 +717,37 @@ Be precise. Only report what you can clearly read."""
         target_parts = game_time.split(":")
         target_total = int(target_parts[0]) * 60 + int(target_parts[1])
 
-        for attempt in range(max_retries):
-            search_start, search_end = base_start, base_end
-
-            # Use nearby cached mappings to narrow search
-            nearby = self.index.get_nearby_mappings(quarter, game_time, tolerance_seconds=120 + attempt * 60)
-            if nearby:
-                for cached_time, vod_secs in nearby:
-                    m_parts = cached_time.split(":")
-                    m_total = int(m_parts[0]) * 60 + int(m_parts[1])
-                    time_diff = m_total - target_total
-                    estimated_vod = vod_secs - (time_diff * 1.5)
-                    # Widen range on each retry
-                    buffer = 120 + attempt * 60
-                    search_start = max(base_start, estimated_vod - buffer)
-                    search_end = min(base_end, estimated_vod + buffer)
-
-            # Also use known frames for better estimation
-            if self.index.known_frames:
-                for vod_str, frame_info in self.index.known_frames.items():
-                    if frame_info["quarter"] == quarter:
-                        f_parts = frame_info["time"].split(":")
-                        f_total = int(f_parts[0]) * 60 + int(f_parts[1])
-                        time_diff = f_total - target_total
-                        estimated = float(vod_str) - (time_diff * 1.3)
-                        if base_start <= estimated <= base_end:
-                            buffer = 90 + attempt * 45
-                            search_start = max(search_start, estimated - buffer)
-                            search_end = min(search_end, estimated + buffer)
-                            break
-
-            if attempt > 0:
-                print(f"\nRetry {attempt + 1}/{max_retries} with range [{search_start:.0f}s, {search_end:.0f}s]")
+        # Check cache - but we'll still verify it's at play start
+        cached = self.index.get_mapping(quarter, game_time)
+        if cached:
+            print(f"Cache hit: Q{quarter} {game_time} -> {cached:.1f}s (will verify)")
+            # Verify the cached timestamp is still valid and at play start
+            clock = self.read_clock_at(cached, retries=1)
+            if clock and clock.quarter == quarter and abs(clock.total_seconds - target_total) <= 1:
+                # Clock matches - now find actual play start
+                play_start = self.find_play_start(cached, quarter, game_time)
+                if play_start != cached:
+                    # Update cache with better timestamp
+                    self.index.set_mapping(quarter, game_time, play_start)
+                return play_start
             else:
-                print(f"Searching for Q{quarter} {game_time} in VOD range [{search_start:.0f}s, {search_end:.0f}s]")
+                print(f"  Cache invalid (clock shows {clock}), re-searching...")
 
-            vod_timestamp = self.find_exact_time(quarter, game_time, search_start, search_end)
+        # Smart search: use full quarter range, let the algorithm jump intelligently
+        # The search algorithm uses readings to calculate where to jump next
+        print(f"Searching for Q{quarter} {game_time} in Q{quarter} range [{base_start:.0f}s, {base_end:.0f}s]")
 
-            if vod_timestamp:
-                self.index.set_mapping(quarter, game_time, vod_timestamp)
-                print(f"Found and cached: Q{quarter} {game_time} -> {vod_timestamp:.1f}s")
-                return vod_timestamp
-
-            # Widen search for next attempt
-            print(f"  Not found in range, will retry with wider search...")
-
-        # Final fallback - search entire quarter
-        print(f"\nFinal attempt: searching entire quarter range [{base_start:.0f}s, {base_end:.0f}s]")
-        vod_timestamp = self.find_exact_time(quarter, game_time, base_start, base_end, tolerance_seconds=5)
+        vod_timestamp = self.find_exact_time(quarter, game_time, base_start, base_end)
 
         if vod_timestamp:
-            self.index.set_mapping(quarter, game_time, vod_timestamp)
-            print(f"Found and cached: Q{quarter} {game_time} -> {vod_timestamp:.1f}s")
-            return vod_timestamp
+            # Found the timestamp - now find actual play start
+            play_start = self.find_play_start(vod_timestamp, quarter, game_time)
+            self.index.set_mapping(quarter, game_time, play_start)
+            print(f"Found and cached: Q{quarter} {game_time} -> {play_start:.1f}s")
+            return play_start
 
-        raise RuntimeError(f"Could not find Q{quarter} {game_time} after exhaustive search")
+        raise RuntimeError(f"Could not find Q{quarter} {game_time} in quarter range")
+
 
     def close(self):
         """Release video capture resources."""
