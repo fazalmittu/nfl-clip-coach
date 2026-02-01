@@ -30,6 +30,12 @@ When you don't need data analysis (e.g. general football questions), just \
 answer directly without code.
 """
 
+GAME_CONTEXT_PROMPT = """\
+The user has selected this game in the app: "{game_context}". \
+When they ask to "summarize the game", "analyze the game", or refer to "the game" without specifying, use this game. \
+Do not ask which game—assume they mean the selected game. Only ask for clarification if they explicitly mention a different game.
+"""
+
 
 # In-memory session store: session_id -> list of message dicts
 _sessions: dict[str, list[dict]] = {}
@@ -41,12 +47,14 @@ def _get_session(session_id: str) -> list[dict]:
     return _sessions[session_id]
 
 
-def chat(session_id: str, message: str) -> str:
+def chat(session_id: str, message: str, game_context: str | None = None) -> str:
     """Process a chat message and return the assistant's response."""
     history = _get_session(session_id)
     history.append({"role": "user", "content": message})
 
     system = SYSTEM_PROMPT.format(categories=get_category_summary())
+    if game_context:
+        system = system + "\n\n" + GAME_CONTEXT_PROMPT.format(game_context=game_context)
 
     response = client.messages.create(
         model=MODEL,

@@ -12,11 +12,14 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from models.schemas import GameTimestamp, ClipTimestamp
 from .indexer import VideoIndexer
 
+PRE_PLAY_PADDING = 5  # seconds before clock-match to start clip
+DEFAULT_CLIP_DURATION = 50  # seconds per clip (play + buffer)
+
 
 def get_clips(
     video_path: str,
     timestamps: list[GameTimestamp],
-    play_buffer_seconds: float = 15.0
+    play_buffer_seconds: float = 15.0,
 ) -> list[ClipTimestamp]:
     """
     Convert game timestamps to VOD clip timestamps.
@@ -29,12 +32,33 @@ def get_clips(
 
         clips = []
         for ts in timestamps:
-            start = indexer.find_vod_timestamp(ts.quarter, ts.time)
-            end = start + ts.duration_seconds + play_buffer_seconds
+            start = max(0, indexer.find_vod_timestamp(ts.quarter, ts.time) - PRE_PLAY_PADDING)
+            end = start + DEFAULT_CLIP_DURATION + play_buffer_seconds
+            pd = ts.play_data or {}
             clips.append(ClipTimestamp(
                 start_time=start,
                 end_time=end,
-                video_path=video_path
+                video_path=video_path,
+                description=pd.get("desc"),
+                play_type=pd.get("play_type"),
+                down=pd.get("down"),
+                ydstogo=pd.get("ydstogo"),
+                yards_gained=pd.get("yards_gained"),
+                posteam=pd.get("posteam"),
+                defteam=pd.get("defteam"),
+                quarter=ts.quarter,
+                game_time=ts.time,
+                posteam_score=pd.get("posteam_score"),
+                defteam_score=pd.get("defteam_score"),
+                passer=pd.get("passer_player_name"),
+                rusher=pd.get("rusher_player_name"),
+                receiver=pd.get("receiver_player_name"),
+                is_touchdown=pd.get("touchdown", False),
+                is_interception=pd.get("interception", False),
+                is_sack=pd.get("sack", False),
+                is_fumble=pd.get("fumble", False),
+                yardline_100=pd.get("yardline_100"),
+                wpa=pd.get("wpa"),
             ))
 
         return clips
@@ -46,10 +70,10 @@ def get_clips(
 if __name__ == "__main__":
     video = "data/49ers-Lions.mp4"
     test_timestamps = [
-        GameTimestamp(quarter=2, time="8:34", duration_seconds=5.0),
-        GameTimestamp(quarter=3, time="5:00", duration_seconds=7.0),
+        GameTimestamp(quarter=2, time="8:34"),
+        GameTimestamp(quarter=3, time="5:00"),
     ]
 
     clips = get_clips(video, test_timestamps)
     for i, clip in enumerate(clips):
-        print(f"Clip {i+1}: {clip.start_time:.1f}s - {clip.end_time:.1f}s")
+        print(f"Clip {i+1}: {clip.start_time:.1f}s")

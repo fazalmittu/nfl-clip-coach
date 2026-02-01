@@ -1,24 +1,23 @@
-* {
-  box-sizing: border-box;
-}
+@import "tailwindcss";
 
-:root {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  line-height: 1.5;
-  font-weight: 400;
-  color-scheme: dark;
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
+/* Chat panel scrollbar — matches dark background */
+.chat-panel-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(38 38 38) transparent;
 }
-
-body {
-  margin: 0;
-  min-width: 320px;
-  min-height: 100vh;
-  background: #1a1a1a;
+.chat-panel-scroll::-webkit-scrollbar {
+  width: 8px;
 }
-
-#root {
-  min-height: 100vh;
+.chat-panel-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.chat-panel-scroll::-webkit-scrollbar-thumb {
+  background: rgb(38 38 38);
+  border-radius: 4px;
+}
+.chat-panel-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgb(64 64 64);
+}
+.chat-panel-scroll::-webkit-scrollbar-corner {
+  background: transparent;
 }

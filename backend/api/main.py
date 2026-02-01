@@ -36,13 +36,21 @@ def analyze(req: AnalyzeRequest):
         result = clip_search_query(req.query)
         clips = []
         if result.timestamps:
-            clips = get_clips(DEFAULT_VIDEO, result.timestamps)
+            buffer = req.play_buffer_seconds if req.play_buffer_seconds is not None else 15.0
+            clips = get_clips(DEFAULT_VIDEO, result.timestamps, play_buffer_seconds=buffer)
         return AnalyzeResponse(mode="video", clips=clips)
 
     elif req.mode == "chat":
         session_id = req.session_id or "default"
-        response = chat(session_id, req.query)
-        return AnalyzeResponse(mode="chat", response=response)
+        response = chat(session_id, req.query, game_context=req.game_name)
+        suggest_clips = False
+        try:
+            clip_result = clip_search_query(req.query)
+            if clip_result.timestamps:
+                suggest_clips = True
+        except Exception:
+            pass
+        return AnalyzeResponse(mode="chat", response=response, suggest_clips=suggest_clips)
 
     return AnalyzeResponse(mode=req.mode, response="Unknown mode. Use 'chat' or 'video'.")
 
