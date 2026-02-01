@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import os
-from pathlib import Path
 from typing import Literal
 
 import pandas as pd
@@ -56,16 +54,6 @@ class PlayQuery(BaseModel):
     then: list[SequenceStep] | None = None
     drive_filter: DriveFilter | None = None
     rank: RankFilter | None = None
-
-
-# ── Data loading ────────────────────────────────────────────────────────────
-
-DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
-
-
-def load_data() -> pd.DataFrame:
-    csv_path = DATA_DIR / "niners_lions_play_by_play_2023.csv"
-    return pd.read_csv(csv_path, low_memory=False)
 
 
 # ── Filter application ─────────────────────────────────────────────────────

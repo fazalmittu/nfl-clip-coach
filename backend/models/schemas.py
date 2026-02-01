@@ -20,3 +20,15 @@ class DataQueryResult(BaseModel):
 
 class ClipResponse(BaseModel):
     clips: list[ClipTimestamp]
+
+
+class AnalyzeRequest(BaseModel):
+    mode: str  # "chat" | "video"
+    query: str
+    session_id: str | None = None
+
+
+class AnalyzeResponse(BaseModel):
+    mode: str
+    response: str | None = None
+    clips: list[ClipTimestamp] | None = None
