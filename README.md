@@ -1,9 +1,5 @@
 # NFL Clip Coach
 
-> Ask a question. Get the clip. Instantly.
-
----
-
 ## The Problem
 
 Coaches, analysts, and fans spend **hours** manually scrubbing through full NFL game footage to find specific plays. Want to see every 3rd-down conversion from the 4th quarter? That means fast-forwarding through a 3+ hour broadcast, squinting at the game clock, and mentally cross-referencing play-by-play logs. A single film session can eat up an entire afternoon just to pull 8-10 clips.
@@ -11,8 +7,6 @@ Coaches, analysts, and fans spend **hours** manually scrubbing through full NFL 
 NFL teams have dedicated film rooms with expensive proprietary tools. Everyone else — aspiring coaches, fantasy analysts, film study enthusiasts — gets nothing. They're stuck with a YouTube video and a spreadsheet.
 
 **NFL Clip Coach fixes this.** Type a question in plain English, get the exact clips instantly.
-
----
 
 ## What We Built
 
@@ -54,8 +48,6 @@ NFL Clip Coach is an AI-powered game film assistant. You type a natural language
                         │ player              │
                         └─────────────────────┘
 ```
-
----
 
 ## System Architecture
 
@@ -119,8 +111,6 @@ NFL Clip Coach is an AI-powered game film assistant. You type a natural language
 │  └──────────────────┘  └───────────────┘  └──────────────────────┘  │
 └─────────────────────────────────────────────────────────────────────┘
 ```
-
----
 
 ## Clip Search Pipeline
 
@@ -195,8 +185,6 @@ Not all plays are equal. A 3-yard run doesn't need the same clip length as a 75-
 
 All clips include a configurable post-play buffer (default 15 s).
 
----
-
 ## Video Indexing
 
 The hardest problem: a play happens at **Q3 8:34** on the game clock, but *where* is that in a 3+ hour video file? Halftime, commercials, and replay breaks make the mapping non-linear.
@@ -268,8 +256,6 @@ The hardest problem: a play happens at **Q3 8:34** on the game clock, but *where
 
 The indexer also detects **dead zones** (halftime, ads, timeouts with no visible game clock) and skips them during processing.
 
----
-
 ## Chat Analysis Mode
 
 For analytical questions, Claude acts as a game analyst with full access to the play-by-play dataset.
@@ -322,8 +308,6 @@ For analytical questions, Claude acts as a game analyst with full access to the 
 
 Claude can write and execute Python/pandas code against the full dataset to answer complex statistical questions, then translates the raw output into a natural language response.
 
----
-
 ## Tech Stack
 
 | Layer | Technology | Purpose |
@@ -337,8 +321,6 @@ Claude can write and execute Python/pandas code against the full dataset to answ
 | **Vision AI** | Google Gemini Vision | Game clock extraction from frames |
 | **Storage** | CSV + JSON cache | Play-by-play data + video index |
 | **Rendering** | react-markdown | Display AI analysis responses |
-
----
 
 ## Vision
 
